@@ -36,11 +36,13 @@ class AnalyzeResponse(BaseModel):
     # Code context
     code_snippet: str
 
-    # AI fields (empty when AI is unavailable)
-    explanation: str
-    root_cause: str
-    suggested_fix: str
-    improved_code: str
+    # AI teacher-style fields
+    concept:          str
+    explanation:      str
+    root_cause:       str
+    analogy:          str
+    step_by_step_fix: str
+    improved_code:    str
 
     # Meta
     cached: bool = False

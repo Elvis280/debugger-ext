@@ -107,18 +107,24 @@ async def analyze(request: AnalyzeRequest):
     """
     print(f"\n[Backend] === New /analyze request ===")
     print(f"[Backend] Language: {request.language}  |  File: {request.file_path}")
-    print(f"[Backend] Stack trace length: {len(request.stack_trace)} chars")
+    print(f"[Backend] Stack trace ({len(request.stack_trace)} chars):\n{request.stack_trace[:500]}")
     log.info("Analyze request: %s (%s)", request.file_path, request.language)
 
     # ── Step 1: Parse stack trace ─────────────────────────────────────────────
     parsed = stp.parse(request.stack_trace)
 
     if parsed is None:
-        print("[Backend] ERROR — could not parse stack trace")
+        # Log the full input so the developer can debug what was received
+        print(f"[Backend] PARSE FAILED — raw input was:\n{request.stack_trace}")
+        log.error("Stack trace parse failed. Raw input: %r", request.stack_trace[:500])
         raise HTTPException(
             status_code=400,
-            detail="Could not parse the stack trace. "
-                   "Ensure the stack_trace field contains valid Python traceback output.",
+            detail=(
+                "Could not parse the stack trace. "
+                "Make sure the Python file actually throws a runtime error. "
+                f"Received ({len(request.stack_trace)} chars): "
+                f"{repr(request.stack_trace[:200])}"
+            ),
         )
 
     # ── Step 2: AST analysis (disk-cached) ───────────────────────────────────
@@ -147,19 +153,21 @@ async def analyze(request: AnalyzeRequest):
 
     # ── Step 6: Build and return response ────────────────────────────────────
     return AnalyzeResponse(
-        error_type     = ctx.error_type,
-        file           = ctx.file,
-        line           = ctx.line,
-        function       = ctx.function,
-        node_type      = ctx.node_type,
-        expression     = ctx.expression,
-        variables      = ctx.variables,
-        possible_cause = ctx.possible_cause,
-        code_snippet   = ctx.code_snippet,
-        explanation    = ai_result.explanation,
-        root_cause     = ai_result.root_cause,
-        suggested_fix  = ai_result.suggested_fix,
-        improved_code  = ai_result.improved_code,
-        cached         = ctx.cached,
-        language       = request.language,
+        error_type       = ctx.error_type,
+        file             = ctx.file,
+        line             = ctx.line,
+        function         = ctx.function,
+        node_type        = ctx.node_type,
+        expression       = ctx.expression,
+        variables        = ctx.variables,
+        possible_cause   = ctx.possible_cause,
+        code_snippet     = ctx.code_snippet,
+        concept          = ai_result.concept,
+        explanation      = ai_result.explanation,
+        root_cause       = ai_result.root_cause,
+        analogy          = ai_result.analogy,
+        step_by_step_fix = ai_result.step_by_step_fix,
+        improved_code    = ai_result.improved_code,
+        cached           = ctx.cached,
+        language         = request.language,
     )

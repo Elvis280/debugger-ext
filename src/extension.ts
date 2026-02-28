@@ -248,11 +248,6 @@ async function runDiagnostics(): Promise<void> {
         try {
             const result = await analyze(request);
 
-            outputChannel.appendLine(
-                `[AI Debugger] Analysis received: ` +
-                `cached=${result.cached}  ai_used=${!!(result.improved_code)}`
-            );
-
             // Update squiggle with the richer backend message
             setInlineDiagnostic(
                 editor.document.uri,
@@ -260,9 +255,11 @@ async function runDiagnostics(): Promise<void> {
                 `${result.error_type}: ${result.possible_cause}`
             );
 
-            // Render final result in the webview
+            // Print teacher-style analysis to the Output Channel (terminal)
+            printResultToChannel(result);
+
+            // Render full result in the webview panel
             webview.showResult(result);
-            outputChannel.appendLine('[AI Debugger] Result displayed in webview');
 
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -277,9 +274,84 @@ async function runDiagnostics(): Promise<void> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
+ * Prints a teacher-style formatted analysis to the VS Code Output Channel
+ * so the user can read the full explanation directly in the terminal panel
+ * WITHOUT opening the webview.
+ *
+ * Layout:
+ *   === ERROR ===========
+ *   [Concept]   what is this error type?
+ *   [What happened] specific explanation
+ *   [Root Cause] precise cause
+ *   [Analogy]   memorable real-world analogy
+ *   [How to Fix] numbered steps
+ *   [Improved Code] corrected snippet
+ */
+function printResultToChannel(r: import('./backendClient').AnalyzeResponse): void {
+    const SEP = '='.repeat(60);
+    const sep2 = '-'.repeat(60);
+    const file = r.file.split(/[\\/]/).pop() ?? r.file;
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine(SEP);
+    outputChannel.appendLine(`  ${r.error_type}  |  ${file}:${r.line}  |  ${r.function}`);
+    outputChannel.appendLine(SEP);
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine('  WHAT IS THIS ERROR?');
+    outputChannel.appendLine(sep2);
+    outputChannel.appendLine(`  ${r.concept}`);
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine('  WHAT WENT WRONG IN YOUR CODE?');
+    outputChannel.appendLine(sep2);
+    outputChannel.appendLine(`  ${r.explanation}`);
+    if (r.expression) {
+        outputChannel.appendLine(`  Failing expression: ${r.expression}`);
+        if (r.variables.length) {
+            outputChannel.appendLine(`  Variables:          ${r.variables.join(', ')}`);
+        }
+    }
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine('  ROOT CAUSE');
+    outputChannel.appendLine(sep2);
+    outputChannel.appendLine(`  ${r.root_cause}`);
+
+    if (r.analogy) {
+        outputChannel.appendLine('');
+        outputChannel.appendLine('  THINK OF IT LIKE THIS...');
+        outputChannel.appendLine(sep2);
+        outputChannel.appendLine(`  ${r.analogy}`);
+    }
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine('  HOW TO FIX IT');
+    outputChannel.appendLine(sep2);
+    r.step_by_step_fix.split(/\n/).filter(l => l.trim()).forEach(l => {
+        outputChannel.appendLine(`  ${l}`);
+    });
+
+    if (r.improved_code) {
+        outputChannel.appendLine('');
+        outputChannel.appendLine('  IMPROVED CODE');
+        outputChannel.appendLine(sep2);
+        r.improved_code.split(/\n/).forEach(l => {
+            outputChannel.appendLine(`  ${l}`);
+        });
+    }
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine(`  cached: ${r.cached}`);
+    outputChannel.appendLine(SEP);
+    outputChannel.appendLine('');
+
+    // Bring the Output Channel into view
+    outputChannel.show(true);
+}
+
+/**
  * Place a single red-squiggle Diagnostic at the given 1-indexed line.
- * Called twice: once immediately after local parse, once after backend
- * returns a richer message.
  */
 function setInlineDiagnostic(
     uri: vscode.Uri,
@@ -291,7 +363,6 @@ function setInlineDiagnostic(
         new vscode.Position(zeroLine, 0),
         new vscode.Position(zeroLine, 500)
     );
-
     const diagnostic = new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Error);
     diagnostic.source = 'AI Debugger';
     diagnosticCollection.set(uri, [diagnostic]);

@@ -31,52 +31,55 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class AiResult:
-    explanation:   str           # 2-4 sentence human explanation
-    root_cause:    str           # single-sentence root cause
-    suggested_fix: str           # 1-3 step fix
-    improved_code: str           # corrected code block
-    ai_used:       bool = True   # False when AI was unavailable / fallback used
+    concept:          str           # what this error type actually means (concept lesson)
+    explanation:      str           # what went wrong in THIS specific code
+    root_cause:       str           # single precise root cause sentence
+    analogy:          str           # real-world analogy to make it memorable
+    step_by_step_fix: str           # numbered steps to fix the problem
+    improved_code:    str           # corrected Python code block
+    ai_used:          bool = True   # False when AI was unavailable / fallback used
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
 def _build_prompt(ctx: ErrorContext) -> str:
     """
-    Build a structured prompt from the ErrorContext.
-    Providing structured input (not just raw traceback) lets the model
-    reason about the specific expression and variables involved.
+    Build a teacher-style structured prompt from the ErrorContext.
+    The model is asked to explain like a patient senior developer teaching
+    a junior — concept first, then specific error, then how to fix it.
     """
     vars_str = ", ".join(ctx.variables) if ctx.variables else "unknown"
 
-    return f"""You are an expert Python debugger. Analyse the runtime error below and \
-respond ONLY with a JSON object — no markdown fences, no extra text.
+    return f"""You are a patient, expert Python teacher explaining a runtime error to a student.
+Your job is to teach — not just fix. Explain the concept, why it happened, give an analogy, then show the fix.
+Respond ONLY with a JSON object — no markdown fences, no extra text.
 
-## Error Information
+## Error Details
 - Error type : {ctx.error_type}
 - Message    : {ctx.message}
 - File       : {ctx.file}  |  Line: {ctx.line}  |  Function: {ctx.function}
-
-## AST Analysis (static analysis result)
-- Node type  : {ctx.node_type or 'unknown'}
 - Expression : {ctx.expression or 'unknown'}
 - Variables  : {vars_str}
 
-## Rule-based pre-diagnosis
+## Static Analysis Pre-diagnosis
 {ctx.possible_cause}
 Hint: {ctx.hint}
 
-## Code snippet (error occurs at line {ctx.line})
+## Code (error at line {ctx.line}, marked with >>>)
 ```python
 {ctx.code_snippet}
 ```
 
-Respond with exactly this JSON structure:
+Respond with EXACTLY this JSON — all 6 fields are required:
 {{
-  "explanation": "<2-4 sentence plain-English explanation of why the error happened>",
-  "root_cause": "<single sentence identifying the precise root cause>",
-  "suggested_fix": "<concrete 1-3 step fix the developer should apply>",
-  "improved_code": "<corrected Python code block, complete function if possible>"
+  "concept": "<2-3 sentences: what is {ctx.error_type}? Explain the concept in simple terms, as if to a beginner who has never seen this error before>",
+  "explanation": "<2-3 sentences: what specifically went wrong in THIS code? Reference the variable names and line number>",
+  "root_cause": "<1 precise sentence identifying the exact root cause in this code>",
+  "analogy": "<1-2 sentences: a real-world analogy that makes this error memorable and intuitive>",
+  "step_by_step_fix": "<numbered list of 2-4 concrete steps the student should take to fix their code>",
+  "improved_code": "<the complete corrected Python code for the function or block that had the error>"
 }}"""
+
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -131,13 +134,15 @@ def _parse_response(raw: str, ctx: ErrorContext) -> AiResult:
 
     try:
         data = json.loads(clean)
-        print("[AiEngine] JSON parsed successfully")
+        print("[AiEngine] JSON parsed successfully — teacher-style response received")
         return AiResult(
-            explanation   = data.get("explanation",   ctx.possible_cause),
-            root_cause    = data.get("root_cause",    ctx.possible_cause),
-            suggested_fix = data.get("suggested_fix", ctx.hint),
-            improved_code = data.get("improved_code", ""),
-            ai_used       = True,
+            concept          = data.get("concept",          f"{ctx.error_type} occurs when Python cannot perform the requested operation."),
+            explanation      = data.get("explanation",      ctx.possible_cause),
+            root_cause       = data.get("root_cause",       ctx.possible_cause),
+            analogy          = data.get("analogy",          ""),
+            step_by_step_fix = data.get("step_by_step_fix", ctx.hint),
+            improved_code    = data.get("improved_code",    ""),
+            ai_used          = True,
         )
     except json.JSONDecodeError as exc:
         print(f"[AiEngine] JSON decode error: {exc} — using fallback")
@@ -147,14 +152,16 @@ def _parse_response(raw: str, ctx: ErrorContext) -> AiResult:
 
 def _fallback(ctx: ErrorContext) -> AiResult:
     """
-    Rule-based fallback used when AI is unavailable.
-    Uses the possible_cause / hint produced by root_cause_detector.
+    Rule-based fallback when AI is unavailable.
+    Uses possible_cause / hint from root_cause_detector.
     """
-    print("[AiEngine] Returning rule-based fallback explanation")
+    print("[AiEngine] Returning rule-based fallback (no AI key or API failure)")
     return AiResult(
-        explanation   = ctx.possible_cause,
-        root_cause    = ctx.possible_cause,
-        suggested_fix = ctx.hint,
-        improved_code = "",
-        ai_used       = False,
+        concept          = f"{ctx.error_type} is a runtime error that occurs when Python cannot complete the requested operation.",
+        explanation      = ctx.possible_cause,
+        root_cause       = ctx.possible_cause,
+        analogy          = "",
+        step_by_step_fix = ctx.hint,
+        improved_code    = "",
+        ai_used          = False,
     )

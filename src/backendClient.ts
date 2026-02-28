@@ -29,9 +29,12 @@ export interface AnalyzeResponse {
     variables: string[];
     possible_cause: string;
     code_snippet: string;
+    // Teacher-style AI fields
+    concept: string;
     explanation: string;
     root_cause: string;
-    suggested_fix: string;
+    analogy: string;
+    step_by_step_fix: string;
     improved_code: string;
     cached: boolean;
     language: string;
