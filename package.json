@@ -1,31 +1,77 @@
 {
   "name": "debugger-ext",
-  "displayName": "debugger-ext",
-  "description": "AI assisted debugging diagnostics",
-  "version": "0.0.1",
+  "displayName": "AI Python Debugger",
+  "description": "AI-powered runtime error analysis for Python with structured AST inspection and Gemini explanations",
+  "version": "1.0.0",
   "engines": {
     "vscode": "^1.109.0"
   },
   "categories": [
+    "Debuggers",
+    "Linters",
     "Other"
   ],
-
   "activationEvents": [
-    "onCommand:debugger-ext.showDiagnostics"
+    "onCommand:debugger-ext.runDiagnostics",
+    "onLanguage:python"
   ],
-
   "main": "./dist/extension.js",
-
   "contributes": {
     "commands": [
       {
         "command": "debugger-ext.runDiagnostics",
-        "category": "Diagnostics",
-        "title": "Run Diagnostics"
+        "category": "AI Debugger",
+        "title": "Run Diagnostics",
+        "icon": "$(bug)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "debugger-ext.runDiagnostics",
+          "when": "editorLangId == python",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Python Debugger",
+      "properties": {
+        "debugger-ext.geminiApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Your **Google Gemini API key**. Get one at [aistudio.google.com](https://aistudio.google.com/). Leave blank to use rule-based fallback only.",
+          "order": 1
+        },
+        "debugger-ext.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:7823",
+          "markdownDescription": "URL of the Debug Analysis Service backend. Use the default for a locally spawned backend, or point to a remote deployment.",
+          "order": 2
+        },
+        "debugger-ext.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Python backend when the extension activates.",
+          "order": 3
+        },
+        "debugger-ext.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to run the target script and spawn the backend. Use full path if Python is not on PATH.",
+          "order": 4
+        },
+        "debugger-ext.contextLines": {
+          "type": "number",
+          "default": 7,
+          "minimum": 3,
+          "maximum": 20,
+          "description": "Number of surrounding lines to include on each side of the error line.",
+          "order": 5
+        }
+      }
+    }
   },
-
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && npm run lint && node esbuild.js",
@@ -40,7 +86,6 @@
     "lint": "eslint src",
     "test": "vscode-test"
   },
-
   "devDependencies": {
     "@types/vscode": "^1.109.0",
     "@types/mocha": "^10.0.10",
