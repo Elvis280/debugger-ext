@@ -1,13 +1,20 @@
 /**
  * extension.ts
+ * ─────────────
+ * Main entry point for the AI Python Debugger VS Code extension.
  *
- * Main entry point for the AI Debugger VS Code extension.
- *
- * Responsibilities:
- *   1. Spawn the Python FastAPI backend on activation (if autoStart enabled)
- *   2. Register the "Run Diagnostics" command
- *   3. Coordinate: run file → capture stderr → local parse → show loading UI
- *      → send to backend → show full result + inline diagnostic
+ * What this file does:
+ *  1. Creates a VS Code Output Channel called "AI Debugger" so that all
+ *     backend print() / logging output streams directly into the VS Code
+ *     terminal panel — visible at View → Output → "AI Debugger".
+ *  2. On activation, spawns the Python FastAPI backend as a child process
+ *     (unless a remote URL is configured or the backend is already running).
+ *  3. Registers the "Run Diagnostics" command which:
+ *       a. Runs the active Python file and captures stderr
+ *       b. Instantly highlights the error line (local parse → no wait)
+ *       c. Extracts code context using VS Code workspace FS APIs
+ *       d. POSTs to the backend /analyze endpoint
+ *       e. Renders the full AI result in a styled webview panel
  */
 
 import * as vscode from 'vscode';
@@ -16,103 +23,154 @@ import * as path from 'path';
 
 import { parseLocally } from './stackTraceParser';
 import { extractContext } from './codeContextExtractor';
-import { analyze, isBackendAlive, AnalyzeRequest } from './backendClient';
+import {
+    analyze, isBackendAlive,
+    AnalyzeRequest
+} from './backendClient';
 import * as webview from './webviewPanel';
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── Module-level state ────────────────────────────────────────────────────────
 
+/** Inline red-squiggle diagnostics collection. */
 let diagnosticCollection: vscode.DiagnosticCollection;
+
+/** Handle to the spawned backend process (null when using a remote backend). */
 let backendProcess: cp.ChildProcess | undefined;
+
+/**
+ * Shared Output Channel — backend print() / logging lines are piped here
+ * so the developer can see the full analysis pipeline in VS Code's
+ * terminal panel without opening a separate terminal.
+ *
+ * View it: View menu → Output → select "AI Debugger" in the dropdown.
+ */
+let outputChannel: vscode.OutputChannel;
+
 
 // ── Activation ────────────────────────────────────────────────────────────────
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-    console.log('[AI Debugger] Extension activated');
+    // Create the Output Channel first — it must exist before the backend spawns
+    outputChannel = vscode.window.createOutputChannel('AI Debugger');
+    context.subscriptions.push(outputChannel);
 
+    outputChannel.appendLine('[AI Debugger] Extension activated');
+    outputChannel.appendLine(`[AI Debugger] Extension path: ${context.extensionPath}`);
+    outputChannel.show(true);   // bring Output panel into focus (non-stealing)
+
+    // Inline diagnostic collection shown as red squiggles in the editor
     diagnosticCollection = vscode.languages.createDiagnosticCollection('ai-debugger');
     context.subscriptions.push(diagnosticCollection);
 
-    // Register command
+    // Register the primary command
     const cmd = vscode.commands.registerCommand(
         'debugger-ext.runDiagnostics',
         () => runDiagnostics()
     );
     context.subscriptions.push(cmd);
 
-    // Optionally auto-start the backend
+    // Optionally auto-start the Python backend
     const cfg = vscode.workspace.getConfiguration('debugger-ext');
     if (cfg.get<boolean>('autoStartBackend', true)) {
         await ensureBackendRunning(context);
     }
 }
 
+
 // ── Deactivation ──────────────────────────────────────────────────────────────
 
 export function deactivate(): void {
+    outputChannel?.appendLine('[AI Debugger] Deactivating — killing backend process');
     backendProcess?.kill();
     backendProcess = undefined;
     webview.dispose();
 }
 
-// ── Backend management ────────────────────────────────────────────────────────
 
+// ── Backend lifecycle management ──────────────────────────────────────────────
+
+/**
+ * Check whether the backend is already running (e.g. from a previous session
+ * or a manually started process).  If not, spawn it as a child process and
+ * pipe its stdout/stderr into the VS Code Output Channel.
+ */
 async function ensureBackendRunning(context: vscode.ExtensionContext): Promise<void> {
+    outputChannel.appendLine('[AI Debugger] Checking if backend is already running…');
+
     const alive = await isBackendAlive();
     if (alive) {
-        console.log('[AI Debugger] Backend already running — skipping spawn');
+        outputChannel.appendLine('[AI Debugger] Backend already running — skipping spawn');
         return;
     }
 
     const cfg = vscode.workspace.getConfiguration('debugger-ext');
     const pythonPath = cfg.get<string>('pythonPath', 'python');
-
-    // Backend directory is a sibling of the extension's root
     const backendDir = path.join(context.extensionPath, 'backend');
     const startScript = path.join(backendDir, 'start_backend.py');
 
+    // Forward the Gemini API key from settings as a CLI argument
     const apiKey = cfg.get<string>('geminiApiKey', '');
     const args = [startScript];
     if (apiKey) {
         args.push('--api-key', apiKey);
     }
 
-    console.log('[AI Debugger] Spawning backend:', pythonPath, args.join(' '));
+    outputChannel.appendLine(`[AI Debugger] Spawning backend: ${pythonPath} ${args.join(' ')}`);
 
     backendProcess = cp.spawn(pythonPath, args, {
         cwd: backendDir,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['ignore', 'pipe', 'pipe'],  // capture stdout and stderr
     });
 
-    backendProcess.stdout?.on('data', (d) =>
-        console.log('[backend]', d.toString().trim())
-    );
-    backendProcess.stderr?.on('data', (d) =>
-        console.error('[backend]', d.toString().trim())
-    );
+    // ── Pipe backend output → VS Code Output Channel ──────────────────────
+    // Every print() and logging line from the Python process appears here.
+    backendProcess.stdout?.on('data', (data: Buffer) => {
+        const lines = data.toString().trim().split('\n');
+        lines.forEach(line => outputChannel.appendLine(line));
+    });
+
+    backendProcess.stderr?.on('data', (data: Buffer) => {
+        const lines = data.toString().trim().split('\n');
+        lines.forEach(line => outputChannel.appendLine(`[stderr] ${line}`));
+    });
+
     backendProcess.on('exit', (code) => {
-        console.warn('[AI Debugger] Backend exited with code', code);
+        outputChannel.appendLine(`[AI Debugger] Backend exited with code ${code}`);
         backendProcess = undefined;
     });
 
-    // Wait up to 6 s for the backend to become available
+    // Poll for readiness — check /health up to 12 times (6 seconds)
+    outputChannel.appendLine('[AI Debugger] Waiting for backend to become ready…');
     for (let i = 0; i < 12; i++) {
         await sleep(500);
         if (await isBackendAlive()) {
-            console.log('[AI Debugger] Backend is ready');
+            outputChannel.appendLine('[AI Debugger] Backend is ready');
+            vscode.window.setStatusBarMessage('$(check) AI Debugger backend ready', 4000);
             return;
         }
     }
 
+    // Backend did not start in time — warn but do not abort
+    outputChannel.appendLine('[AI Debugger] WARNING: Backend did not start in time');
     vscode.window.showWarningMessage(
-        '[AI Debugger] Backend did not start in time. ' +
-        'Try running `python start_backend.py` manually in the backend/ folder.'
+        '[AI Debugger] Backend did not start. ' +
+        'Run `python start_backend.py` in the backend/ folder, ' +
+        'then try again.  Check the Output panel for details.'
     );
 }
 
-// ── Main command ──────────────────────────────────────────────────────────────
 
+// ── Main command: Run Diagnostics ─────────────────────────────────────────────
+
+/**
+ * Full analysis pipeline triggered by the "Run Diagnostics" command:
+ *
+ *  save → exec Python → capture stderr → local parse (instant squiggle)
+ *  → extract code context → POST /analyze → show webview result
+ */
 async function runDiagnostics(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
+
     if (!editor) {
         vscode.window.showErrorMessage('[AI Debugger] No active editor.');
         return;
@@ -121,11 +179,11 @@ async function runDiagnostics(): Promise<void> {
     const filePath = editor.document.fileName;
 
     if (!filePath.endsWith('.py')) {
-        vscode.window.showWarningMessage('[AI Debugger] Only Python files are supported.');
+        vscode.window.showWarningMessage('[AI Debugger] Only Python (.py) files are supported.');
         return;
     }
 
-    // Save the file first so we run the latest version
+    // Save first so we always analyse the latest version on disk
     await editor.document.save();
     diagnosticCollection.clear();
 
@@ -133,37 +191,53 @@ async function runDiagnostics(): Promise<void> {
     const pythonPath = cfg.get<string>('pythonPath', 'python');
     const contextLines = cfg.get<number>('contextLines', 7);
 
+    outputChannel.appendLine(`\n${'─'.repeat(60)}`);
+    outputChannel.appendLine(`[AI Debugger] Running: ${pythonPath} "${filePath}"`);
     vscode.window.setStatusBarMessage('$(sync~spin) AI Debugger: running…', 30_000);
 
+    // ── Execute the Python file ───────────────────────────────────────────────
     cp.exec(`"${pythonPath}" "${filePath}"`, async (error, stdout, stderr) => {
         vscode.window.setStatusBarMessage('');
-
         const output = stderr || stdout || '';
 
-        // No error at all
+        outputChannel.appendLine(`[AI Debugger] Process exited (error=${!!error})`);
+
+        // No error — nothing to analyse
         if (!error && !stderr.trim()) {
-            vscode.window.showInformationMessage('✅ No runtime errors detected.');
+            outputChannel.appendLine('[AI Debugger] No runtime errors detected');
+            vscode.window.showInformationMessage('AI Debugger: No runtime errors detected.');
             return;
         }
 
-        // ── Step 1: lightweight local parse for instant feedback ─────────────
+        outputChannel.appendLine('[AI Debugger] Captured output:');
+        output.split('\n').forEach(l => outputChannel.appendLine(`  ${l}`));
+
+        // ── Step 1: Lightweight local parse → instant squiggle ────────────────
         const local = parseLocally(output);
 
         if (!local) {
-            vscode.window.showErrorMessage('[AI Debugger] Could not detect a Python error in the output.');
+            outputChannel.appendLine('[AI Debugger] Could not detect a Python error in output');
+            vscode.window.showErrorMessage('[AI Debugger] Could not detect a Python error in output.');
             return;
         }
 
-        // Show inline diagnostic immediately
+        outputChannel.appendLine(
+            `[AI Debugger] Local parse: ${local.errorType} at line ${local.line}`
+        );
+
+        // Show an immediate inline diagnostic while the backend processes
         setInlineDiagnostic(editor.document.uri, local.line, `${local.errorType}: ${local.message}`);
 
-        // Show loading panel
+        // Show loading state in the webview
         webview.showLoading(local.errorType, local.file);
 
-        // ── Step 2: extract code context via VS Code APIs ─────────────────────
+        // ── Step 2: Extract code context via VS Code workspace FS ─────────────
+        outputChannel.appendLine('[AI Debugger] Extracting code context…');
         const ctx = await extractContext(local.file, local.line, contextLines);
 
-        // ── Step 3: send to backend ───────────────────────────────────────────
+        // ── Step 3: POST to backend /analyze ──────────────────────────────────
+        outputChannel.appendLine('[AI Debugger] Sending to backend /analyze…');
+
         const request: AnalyzeRequest = {
             stack_trace: output,
             code_snippet: ctx.snippet || ctx.functionBlock,
@@ -174,27 +248,42 @@ async function runDiagnostics(): Promise<void> {
         try {
             const result = await analyze(request);
 
-            // Update inline diagnostic with richer message from backend
+            outputChannel.appendLine(
+                `[AI Debugger] Analysis received: ` +
+                `cached=${result.cached}  ai_used=${!!(result.improved_code)}`
+            );
+
+            // Update squiggle with the richer backend message
             setInlineDiagnostic(
                 editor.document.uri,
                 result.line,
                 `${result.error_type}: ${result.possible_cause}`
             );
 
+            // Render final result in the webview
             webview.showResult(result);
+            outputChannel.appendLine('[AI Debugger] Result displayed in webview');
+
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
+            outputChannel.appendLine(`[AI Debugger] Backend error: ${msg}`);
             vscode.window.showErrorMessage(`[AI Debugger] Backend error: ${msg}`);
             webview.showError(msg);
         }
     });
 }
 
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/**
+ * Place a single red-squiggle Diagnostic at the given 1-indexed line.
+ * Called twice: once immediately after local parse, once after backend
+ * returns a richer message.
+ */
 function setInlineDiagnostic(
     uri: vscode.Uri,
-    line: number,      // 1-indexed
+    line: number,    // 1-indexed
     message: string
 ): void {
     const zeroLine = Math.max(0, line - 1);
@@ -202,11 +291,13 @@ function setInlineDiagnostic(
         new vscode.Position(zeroLine, 0),
         new vscode.Position(zeroLine, 500)
     );
+
     const diagnostic = new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Error);
     diagnostic.source = 'AI Debugger';
     diagnosticCollection.set(uri, [diagnostic]);
 }
 
+/** Simple promise-based sleep utility. */
 function sleep(ms: number): Promise<void> {
-    return new Promise((r) => setTimeout(r, ms));
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
