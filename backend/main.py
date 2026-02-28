@@ -18,7 +18,9 @@ Start manually:
 import os
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,6 +30,14 @@ import services.ast_analyzer          as asta
 import services.root_cause_detector   as rcd
 import services.error_context_builder as ecb
 import services.ai_engine             as ai
+
+# ── Load environment variables ────────────────────────────────────────────────
+# Reads GEMINI_API_KEY (and any other vars) from backend/.env
+# An existing shell environment variable always takes priority over .env
+_ENV_FILE = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=_ENV_FILE, override=False)   # override=False: shell wins
+print(f"[Backend] Loaded .env from {_ENV_FILE} (exists={_ENV_FILE.exists()})")
+
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 # All print() statements in service modules go to stdout.

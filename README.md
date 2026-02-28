@@ -75,10 +75,15 @@ pip install -r requirements.txt
 
 ### 2 — Add your Gemini API key *(optional)*
 
-In VS Code: `Ctrl+,` → search **AI Python Debugger** → paste key in **`geminiApiKey`**.
+Open `backend/.env` and paste your key:
+
+```env
+GEMINI_API_KEY=your_key_here
+```
 
 Get a free key at → **[aistudio.google.com](https://aistudio.google.com/)**
 
+> `.env` is gitignored — it will never be committed.  
 > Without a key, the extension still works using rule-based analysis.
 
 ### 3 — Launch the extension

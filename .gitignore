@@ -3,3 +3,9 @@ dist
 node_modules
 .vscode-test/
 *.vsix
+
+# Python backend
+backend/.env
+backend/.ast_cache/
+__pycache__/
+*.pyc
